@@ -71,19 +71,37 @@
 #  To install software, run upgrades and do other changes to the raspberry setup, simply remove the init=
 #  entry from the cmdline.txt file and reboot, make the changes, add the init= entry and reboot once more.
 
-    quiet(){
-        return 1
+    QUIET=1
+    SAFE=0  #Any failures abort to original boot process.  Unsafe starts debug console/
+    FAIL_TO_OVERLAY=0 #0=Try really hard to mount the overlay even if root-rw not found
+    RW="/mnt/root-rw"  # Mount point for writable drive
+    UNRECOVERABLE=0
+    RECOVERABLE=0
+
+    log_unrecoverable_failure(){
+        echo -e "[FAIL:overlay] $1"
+        ((UNRECOVERABLE++))
     }
-    fail(){
-      echo -e "[FAIL:overlay] $1"
-      # if this appears to hang your machine make sure your active console is the last 'console=' entry
-      # in /boot/cmdline.txt
-      /bin/bash
+    log_recoverable_failure(){
+        echo -e "[FAIL:overlay] $1"
+        ((RECOVERABLE++))
     }
 
-    info(){
-      if quiet; then return; fi
+    log_info(){
+      if $QUIET; then return; fi
       echo -e "[INFO:overlay] $1"
+    }
+
+    fail(){
+        log_unrecoverable_failure $1
+        if $SAFE; then
+            /bin/init
+            exit 0
+        else
+        # if this appears to hang your machine make sure your active console is the last 'console=' entry
+        # in /boot/cmdline.txt
+            /bin/bash
+        fi
     }
 
     # Stolen from usr/share/initramfs-tools/scripts/functions
@@ -113,7 +131,7 @@
           done < "$file"
         fi
       done
-      info "fstab lookup of $1 $2 returned $MNT_FSNAME $MNT_DIR $MNT_TYPE $MNT_OPTS $MNT_FREQ $MNT_PASS $MNT_JUNK"
+      log_info "fstab lookup of $1 $2 returned $MNT_FSNAME $MNT_DIR $MNT_TYPE $MNT_OPTS $MNT_FREQ $MNT_PASS $MNT_JUNK"
       return $found
     }
 
@@ -126,10 +144,10 @@
         result=1
         while [ $count -lt $TIMEOUT ];
         do
-            info "Waiting for device $1 $count";
+            log_info "Waiting for device $1 $count";
             test -e $1
             if [ $? -eq 0 ]; then
-                info "$1 appeared after $count seconds";
+                log_info "$1 appeared after $count seconds";
                 result=0
                 break;
             fi
@@ -148,21 +166,31 @@
 
         DEV="$1"
         if $(echo "$DEV" | grep -q "^/dev/"); then
-            info "No resolution necessary, device $DEV was available directly"
+            log_info "No resolution necessary, device $DEV was available directly"
         elif $(echo "$1" | grep -q '='); then
-            info "looking up $1 by a partuuid or uuid"
+            log_info "looking up $1 by a partuuid or uuid"
             DEV="$(blkid -l -t $1 -o device)"
             if [ ! -z "$DEV" ]; then
-              info "Resolved device $DEV from UUID/PARTUUID $1"
+              log_info "Resolved device $DEV from UUID/PARTUUID $1"
             fi
         fi
-        info "final resolution is $DEV"
+        log_info "final resolution is $DEV"
         return $(echo "$DEV" | grep -q  "^/dev/")
     }
 
+    # Run the command specified in $1. Log the result. If the command fails and safe is selected abort to /bin/init
+    # Otherwise drop to a bash prompt.
+    run_protected_command(){
+        log_info "Running protected command: $1"
+        eval $1
+        if [ $? -ne 0 ]; then
+            if $SAFE; then
+                undo
+            fi
+            fail "ERROR: error executing $1"
+        fi
+    }
 
-    # Mount point for writable drive
-    RW="/mnt/root-rw"
 
     # load module
     modprobe overlay
@@ -178,95 +206,75 @@
     gpio mode 4 up  # activate pull up resistor  ground is just above pin 4
 
     if [[ $(gpio read 4) = 0 ]]; then
-        info "aborting overlayRoot due to jumper"
+        log_info "aborting overlayRoot due to jumper"
         exec /sbin/init
         exit 0
     else
-        info "No jumper -- running overlay root"
+        log_info "No jumper -- running overlay root"
     fi
 
-
-    # create a writable fs to then create our mountpoints
-    mount -t tmpfs inittemp /mnt
-    if [ $? -ne 0 ]; then
-        fail "ERROR: could not create a temporary filesystem to mount the base filesystems for overlayfs"
-    fi
-
-    mkdir /mnt/lower
-    mkdir $RW
-    if read_fstab_entry $RW; then
-        info "found fstab entry for $RW"
-        # Things don't go well if usb is not up or fsck is being performed
-        # kludge -- wait for /dev/sda1
-
-        await_device "/dev/sda1"  20  #Wait a generous amount of time for first device
-        if ! resolve_device "$MNT_FSNAME" "root-rw"; then
-            info "No device found for $RW going to wait for /dev/sdb1..."
-            DEV="/dev/sdb1"
-        fi
-
-        #This time we are hopefully waiting for the actual device not /dev/sda1
-        if await_device "$DEV" 5; then
-            info "$DEV device found"
-        else
-            info "$DEV device not found"
-        fi
-
-        #Retry the lookup
-
-        if ! resolve_device "$MNT_FSNAME" "root-rw"; then
-            info "Still no device found for $RW"
-        fi
-
-        if [ -z "$DEV" ]; then
-            info "Couldn't resolve the RW media, mounting a tmpfs instead"
-            info "You should test for this and send an alert.  You could grep 'emergency' in /proc/mounts"
-            mount -t tmpfs emergency-root-rw $RW
-            if [ $? -ne 0 ]; then
-              fail "ERROR: could not create emergency tempfs for upper filesystem"
-            fi
-        elif  ! $(test -e "$DEV"); then
-            info "Couldn't locate the RW media on $DEV, mounting a tmpfs instead"
-            info "You should test for this and send an alert.  You could grep 'emergency' in /proc/mounts"
-            mount -t tmpfs emergency-root-rw $RW
-            if [ $? -ne 0 ]; then
-              fail "ERROR: could not create emergency tempfs for upper filesystem"
-            fi
-        else
-            info "Running mount -t $MNT_TYPE -o $MNT_OPTS $DEV $RW"
-            mount -t $MNT_TYPE -o $MNT_OPTS $DEV $RW
-            if [ $? -ne 0 ]; then
-                fail "ERROR: could not mount $DEV options: $MNT_OPTS on $RW for upper filesystem"
-            fi
-        fi
-    else
-        info "No fstab entry, mounting tmpfs"
-        mount -t tmpfs tmp-root-rw $RW
-        if [ $? -ne 0 ]; then
-          fail "ERROR: could not create tempfs for upper filesystem"
-        fi
-    fi
-
-    mkdir -p $RW/upper
-    mkdir -p $RW/work
-    mkdir /mnt/newroot
-    # mount root filesystem readonly
+    ######################### PHASE 1 DATA COLLECTION #############################################################
 
     read_fstab_entry "/"
     if ! resolve_device $MNT_FSNAME "rootfs"; then
-        fail "Can't resolve root device from $MNT_FSNAME or label rootfs.  Try changing entry to UUID or plain device"
+        log_unrecoverable_failure "Can't resolve root device from $MNT_FSNAME or label rootfs.  Try changing entry to UUID or plain device"
     fi
-    info "Mounting ro root: mount -t $MNT_TYPE -o $MNT_OPTS,ro $DEV /mnt/lower"
-    mount -t $MNT_TYPE -o $MNT_OPTS,ro $DEV /mnt/lower
 
-    info "Mounting overlay: mount -t overlay -o lowerdir=/mnt/lower,upperdir=$RW/upper,workdir=$RW/work overlayfs-root /mnt/newroot"
-    mount -t overlay -o lowerdir=/mnt/lower,upperdir=$RW/upper,workdir=$RW/work overlayfs-root /mnt/newroot
-    if [ $? -ne 0 ]; then
-        fail "ERROR: could not mount overlayFS"
+    ROOT_MOUNT="mount -t $MNT_TYPE -o $MNT_OPTS,ro $DEV /mnt/lower"
+
+    if read_fstab_entry $RW; then
+        log_info "found fstab entry for $RW"
+        # Things don't go well if usb is not up or fsck is being performed
+        # kludge -- wait for /dev/sda1
+        await_device "/dev/sda1"  20  #Wait a generous amount of time for first device
+        if ! resolve_device "$MNT_FSNAME"; then
+            log_info "No device found for $RW going to try for /dev/sdb1..."
+            DEV="/dev/sdb1"
+        fi
+        #This time we are hopefully waiting for the actual device not /dev/sdb1
+        await_device "$DEV" 5
+        #Retry the lookup
+        resolve_device "$MNT_FSNAME"
+
+        if [ -z "$DEV" ]; then
+            log_recoverable_failure "Couldn't resolve the RW media"
+            RW_MOUNT="mount -t tmpfs emergency-root-rw $RW"
+        elif  ! $(test -e "$DEV"); then
+            log_recoverable_failure "Resolved RW media to $DEV but couldn't locate media on $DEV"
+            RW_MOUNT="mount -t tmpfs emergency-root-rw $RW"
+        else
+            RW_MOUNT="mount -t $MNT_TYPE -o $MNT_OPTS $DEV $RW"
+        fi
+    else
+        log_info "No rw fstab entry, will mount a tmpfs"
+        RW_MOUNT="mount -t tmpfs tmp-root-rw $RW"
     fi
+
+    ####################### PHASE 2 SANITY CHECK AND ABORT HANDLING ###############################################
+
+    if [ $UNRECOVERABLE -gt 0 ]; then
+        fail "Fix $UNRECOVERABLE unrecoverable errors (and maybe $RECOVERABLE recoverable errors before overlayRoot will work"
+    fi
+
+    if [ $RECOVERABLE -gt 0 ] && [ ! $FAIL_TO_OVERLAY ]; then
+        fail "Fix $RECOVERABLE recoverable errors or enable FAIL_TO_OVERLAY before overlayRoot will work"
+    fi
+
+    ###################### PHASE 3 ACTUALLY DO STUFF ##############################################################
+
+    # create a writable fs to then create our mountpoints
+    run_protected_command "mount -t tmpfs inittemp /mnt"
+    mkdir /mnt/lower
+    mkdir -p $RW/upper
+    mkdir -p $RW/work
+    mkdir /mnt/newroot
+    run_protected_command $ROOT_MOUNT
+    run_protected_comand $RW_MOUNT
+
     # create mountpoints inside the new root filesystem-overlay
     mkdir -p /mnt/newroot/ro
     mkdir -p /mnt/newroot/rw
+
     # remove root mount from fstab (this is already a non-permanent modification)
     grep -v "$DEV" /mnt/lower/etc/fstab > /mnt/newroot/etc/fstab
     echo "#the original root mount has been removed by overlayRoot.sh" >> /mnt/newroot/etc/fstab
