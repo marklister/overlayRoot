@@ -9,7 +9,7 @@
 #       is not found it look for a PARTUUID string in fstab for / and convert that to a device name
 #       using the blkid command.
 #
-#  1.2: Modified the mount point to /mnt/root-rw and if a partition is mounted there (an fstab entry exists)
+#  1.2: Modified the rw mount point to /mnt/root-rw and if a partition is mounted there (an fstab entry exists)
 #       already use that partition as the upper.  Allows one to offload writes to some other media and
 #       possibly write back the changes periodically to the lower.  Note when running in this mode
 #       a swapfile may be a reasonable idea.
@@ -19,8 +19,7 @@
 #
 #       I couldn't get partuuids to work, they seem to be available only after boot.  Try uuids or plain devices
 #
-#       Resolution by partition label is disabled.  It's very easy to mess this up.  At the end of the day
-#       the entire purpose of fstab is to mount the correct devices at the correct places.
+#       Resolution by partition label is disabled unless one enables FAIL_TO-OVERLAY in the script
 #
 #       Support for a jumper on gpio 4 which disables the script if you ground the pin.  Install wiringpi if
 #       you want to use this.
@@ -73,7 +72,7 @@
 
     QUIET=0  #0 is noisy
     SAFE=1  #1 Any unrecoverable failures abort to original boot process.  Unsafe starts debug console/
-    FAIL_TO_OVERLAY=1 # 1=Try really hard to mount the overlay even if root-rw not found
+    FAIL_TO_OVERLAY=1 # 1=Try really hard to mount the overlay even if root and root-rw not found
     RW="/mnt/root-rw"  # Mount point for writable drive
     if [ $FAIL_TO_OVERLAY -eq 1 ]; then
         ROOT_LBL="rootfs"
