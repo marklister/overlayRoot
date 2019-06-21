@@ -71,36 +71,42 @@
 #  To install software, run upgrades and do other changes to the raspberry setup, simply remove the init=
 #  entry from the cmdline.txt file and reboot, make the changes, add the init= entry and reboot once more.
 
-    QUIET=1
-    SAFE=0  #Any failures abort to original boot process.  Unsafe starts debug console/
-    FAIL_TO_OVERLAY=0 #0=Try really hard to mount the overlay even if root-rw not found
+    QUIET=0  #0 is noisy
+    SAFE=1  #1 Any unrecoverable failures abort to original boot process.  Unsafe starts debug console/
+    FAIL_TO_OVERLAY=1 # 1=Try really hard to mount the overlay even if root-rw not found
     RW="/mnt/root-rw"  # Mount point for writable drive
+    if [ $FAIL_TO_OVERLAY -eq 1 ]; then
+        ROOT_LBL="rootfs"
+        RW_LBL="root-rw"
+    fi
     UNRECOVERABLE=0
     RECOVERABLE=0
 
     log_unrecoverable_failure(){
-        echo -e "[FAIL:overlay] $1"
+        echo -e "[FAIL:overlay] $@"
         ((UNRECOVERABLE++))
     }
     log_recoverable_failure(){
-        echo -e "[FAIL:overlay] $1"
+        echo -e "[FAIL:overlay] $@"
         ((RECOVERABLE++))
     }
 
     log_info(){
-      if $QUIET; then return; fi
+      if [ $QUIET -eq 1 ]; then return; fi
       echo -e "[INFO:overlay] $1"
     }
 
     fail(){
-        log_unrecoverable_failure $1
-        if $SAFE; then
-            /bin/init
+        log_unrecoverable_failure $@
+        if [ $SAFE -eq 1 ]; then
+            exec /sbin/init
+            #/bin/bash
             exit 0
         else
         # if this appears to hang your machine make sure your active console is the last 'console=' entry
         # in /boot/cmdline.txt
-            /bin/bash
+            exec /bin/bash # one can "exit" to original boot process
+            exec /bin/init
         fi
     }
 
@@ -170,8 +176,9 @@
         elif $(echo "$1" | grep -q '='); then
             log_info "looking up $1 by a partuuid or uuid"
             DEV="$(blkid -l -t $1 -o device)"
-            if [ ! -z "$DEV" ]; then
-              log_info "Resolved device $DEV from UUID/PARTUUID $1"
+            if [ -z "$DEV" ]; then
+                log_info "unable to resolve $1 trying by label $2"
+                DEV="$(blkid -L $2 -o device)"
             fi
         fi
         log_info "final resolution is $DEV"
@@ -184,8 +191,9 @@
         log_info "Running protected command: $1"
         eval $1
         if [ $? -ne 0 ]; then
-            if $SAFE; then
+            if [ $SAFE -eq 1 ]; then
                 undo
+                exec /sbin/init
             fi
             fail "ERROR: error executing $1"
         fi
@@ -193,15 +201,9 @@
 
 
     # load module
-    modprobe overlay
-    if [ $? -ne 0 ]; then
-        fail "ERROR: missing overlay kernel module"
-    fi
+    run_protected_command "modprobe overlay"
     # mount /proc
-    mount -t proc proc /proc
-    if [ $? -ne 0 ]; then
-        fail "ERROR: could not mount proc"
-    fi
+    run_protected_command "mount -t proc proc /proc"
 
     gpio mode 4 up  # activate pull up resistor  ground is just above pin 4
 
@@ -215,35 +217,33 @@
 
     ######################### PHASE 1 DATA COLLECTION #############################################################
 
+    # ROOT
     read_fstab_entry "/"
-    if ! resolve_device $MNT_FSNAME "rootfs"; then
+
+    if ! resolve_device $MNT_FSNAME $ROOT_LBL; then
         log_unrecoverable_failure "Can't resolve root device from $MNT_FSNAME or label rootfs.  Try changing entry to UUID or plain device"
     fi
 
     ROOT_MOUNT="mount -t $MNT_TYPE -o $MNT_OPTS,ro $DEV /mnt/lower"
 
+    # ROOT-RW
     if read_fstab_entry $RW; then
         log_info "found fstab entry for $RW"
         # Things don't go well if usb is not up or fsck is being performed
         # kludge -- wait for /dev/sda1
         await_device "/dev/sda1"  20  #Wait a generous amount of time for first device
-        if ! resolve_device "$MNT_FSNAME"; then
+        if ! resolve_device $MNT_FSNAME $RW_LBL; then
             log_info "No device found for $RW going to try for /dev/sdb1..."
             DEV="/dev/sdb1"
         fi
         #This time we are hopefully waiting for the actual device not /dev/sdb1
         await_device "$DEV" 5
         #Retry the lookup
-        resolve_device "$MNT_FSNAME"
-
-        if [ -z "$DEV" ]; then
-            log_recoverable_failure "Couldn't resolve the RW media"
-            RW_MOUNT="mount -t tmpfs emergency-root-rw $RW"
-        elif  ! $(test -e "$DEV"); then
-            log_recoverable_failure "Resolved RW media to $DEV but couldn't locate media on $DEV"
-            RW_MOUNT="mount -t tmpfs emergency-root-rw $RW"
-        else
+        if resolve_device $MNT_FSNAME $RW_LBL  &&  test -e "$DEV"; then
             RW_MOUNT="mount -t $MNT_TYPE -o $MNT_OPTS $DEV $RW"
+        else
+            log_recoverable_failure "Couldn't resolve the RW media or find it on $DEV"
+            RW_MOUNT="mount -t tmpfs emergency-root-rw $RW"
         fi
     else
         log_info "No rw fstab entry, will mount a tmpfs"
@@ -253,23 +253,31 @@
     ####################### PHASE 2 SANITY CHECK AND ABORT HANDLING ###############################################
 
     if [ $UNRECOVERABLE -gt 0 ]; then
-        fail "Fix $UNRECOVERABLE unrecoverable errors (and maybe $RECOVERABLE recoverable errors before overlayRoot will work"
-    fi
-
-    if [ $RECOVERABLE -gt 0 ] && [ ! $FAIL_TO_OVERLAY ]; then
-        fail "Fix $RECOVERABLE recoverable errors or enable FAIL_TO_OVERLAY before overlayRoot will work"
+        echo "Fix $UNRECOVERABLE unrecoverable errors and maybe $RECOVERABLE recoverable errors before overlayRoot will work"
+        exec /sbin/init
+        exit 0
+    elif [ $RECOVERABLE -gt 0 ] && [ $FAIL_TO_OVERLAY -eq 0]; then
+    echo stuff
+        #fail "Fix $RECOVERABLE recoverable errors or enable FAIL_TO_OVERLAY before overlayRoot will work"
     fi
 
     ###################### PHASE 3 ACTUALLY DO STUFF ##############################################################
 
-    # create a writable fs to then create our mountpoints
     run_protected_command "mount -t tmpfs inittemp /mnt"
+
+    # create a writable fs to then create our mountpoints
     mkdir /mnt/lower
+    mkdir /mnt/root-rw
+    mkdir /mnt/newroot
+
+    run_protected_command "$RW_MOUNT"
+    run_protected_command "$ROOT_MOUNT"
+
     mkdir -p $RW/upper
     mkdir -p $RW/work
-    mkdir /mnt/newroot
-    run_protected_command $ROOT_MOUNT
-    run_protected_comand $RW_MOUNT
+
+    run_protected_command "mount -t overlay -o lowerdir=/mnt/lower,upperdir=$RW/upper,workdir=$RW/work overlayfs-root /mnt/newroot"
+
 
     # create mountpoints inside the new root filesystem-overlay
     mkdir -p /mnt/newroot/ro
