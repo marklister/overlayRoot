@@ -1,4 +1,4 @@
-###Install
+### Install
 1. Copy this directory to a directory on your pi.  Change to that directory and run `sudo bash install`
 ```bash
 git clone https://github.com/marklister/overlayRoot.git
