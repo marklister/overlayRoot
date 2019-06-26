@@ -6,20 +6,22 @@ cd overlayRoot
 sudo bash install
 
 ```
-1. Edit /etc/overlayRoot.conf:  to suit your preferences. OverlayRoot should work as expected with everything 
+1. Edit `/etc/overlayRoot.conf`:  to suit your preferences. OverlayRoot should work as expected with everything 
 set to default.
 
-1. OverlayRoot should work in 
-    as a read only root filesystem with a tmpfs overlay without any editing of /etc/fstab.  Edit your fstab if you 
+1. OverlayRoot should work 
+    as a read only root filesystem with a tmpfs overlay without any editing of /etc/fstab.  Only edit your fstab if you 
     require a persistent RW overlay or want to identify partitions by UUID. 
     Use `blkid` to display UUIDs.   
 
+### Swap
 1. Recommend disabling swapping before using overlayRoot. 
 ```bash
 sudo dphys-swapfile swapoff
 sudo dphys-swapfile uninstall
 sudo update-rc.d dphys-swapfile remove
 ```
+### Disable OverlayRoot
 4. To disable rootOverlay you can jumper the pin specified in the .conf file (default gpio 4) to ground.  Alternatively edit your 
 cmdline.txt file and place init=/sbin/overlayRoot.sh on a separate line.  
  
