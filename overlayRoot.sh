@@ -54,6 +54,8 @@
 #  not shut down properly
 #
 #  Install:
+#  sudo apt install initramfs-tools # We don't use an initramfs but we borrow some bash functions from them.
+#  sudo apt install wiringpi  # if jumper detection required
 #  copy this script to /sbin/overlayRoot.sh, make it executable and add "init=/sbin/overlayRoot.sh" to the
 #  cmdline.txt file in the raspbian image's boot partition.
 #  I strongly recommend to disable swapping before using this. it will work with swap but that just does
@@ -70,74 +72,90 @@
 #  To install software, run upgrades and do other changes to the raspberry setup, simply remove the init=
 #  entry from the cmdline.txt file and reboot, make the changes, add the init= entry and reboot once more.
 
-    QUIET=0  #0 is noisy
-    SAFE=1  #1 Any unrecoverable failures abort to original boot process.  Unsafe starts debug console/
-    FAIL_TO_OVERLAY=1 # 1=Try really hard to mount the overlay even if root and root-rw not found
-    RW="/mnt/root-rw"  # Mount point for writable drive
-    if [ $FAIL_TO_OVERLAY -eq 1 ]; then
-        ROOT_LBL="rootfs"
-        RW_LBL="root-rw"
-    fi
-    UNRECOVERABLE=0
-    RECOVERABLE=0
+defaults(){
 
-    log_unrecoverable_failure(){
-        echo -e "[FAIL:overlay] $@"
-        ((UNRECOVERABLE++))
+    # OverlayRoot config file
+    # What to do if the script fails
+    # original = run the original /sbin/init
+    # console = start a bash console. Useful for debugging
+
+    ON_FAIL=original
+
+    # Discover the root device using PARTUUID=xxx UUID=xxx or LABEL= xxx  if the fstab detection fails.
+    # Note PARTUUID does not work at present.
+    # Default is "LABEL=rootfs".  This makes the script work out of the box
+
+    SECONDARY_ROOT_RESOLUTION="LABEL=rootfs"
+
+    # The filesystem name to use for the RW partition
+    # Default root-rw
+
+    RW_NAME=root-rw
+
+    # Discover the rw device using PARTUUID=xxx UUID=xxx or LABEL= xxx  if the fstab detection fails.
+    # Note PARTUUID does not work at present.
+    # Default is "LABEL=root-rw".  This makes the script work out of the box if the user labels their partition
+
+    SECONDARY_RW_RESOLUTION="LABEL=root-rw"
+
+    # What to do if the user has specified rw media in fstab and it is not found using primary and secondary lookup?
+    # fail = follow the fail logic see ON_FAIL
+    # tmpfs = mount a tmpfs at the root-rw location Default
+
+    ON_RW_MEDIA_NOT_FOUND=tmpfs
+
+    LOGGING=warning
+
+    LOG_FILE=/var/log/overlayRoot.log
+
+    #Jumper this pin to ground to disable rootOverlay
+    GPIO_DISABLE=4
+
+    # Jumper this pin to ground to boot to an emergency bash console
+    GPIO_CONSOLE=1
+
+    source /etc/overlayRoot.conf
+}
+
+    source ./usr/share/initramfs-tools/scripts/functions  #we use read_fstab_entry and resolve_device
+    defaults
+    rootmnt=""
+    RW="/mnt/$RW_NAME"  # Mount point for writable drive
+
+    FAILURES=0
+    WARNINGS=0
+
+    log_fail(){
+        if [ $LOGGING == "warning" ] || [ $LOGGING == "fail" ]; then
+            echo -e "[FAIL:overlay] $@" | tee -a /mnt/overlayRoot.log
+        fi
+        ((FAILURES++))
     }
-    log_recoverable_failure(){
-        echo -e "[FAIL:overlay] $@"
-        ((RECOVERABLE++))
+    log_warning(){
+        if [ $LOGGING == "warning" ] || [ $LOGGING == "fail" ]; then
+            echo -e "[FAIL:overlay] $@" | tee -a /mnt/overlayRoot.log
+        fi
+        ((WARNINGS++))
     }
 
     log_info(){
-      if [ $QUIET -eq 1 ]; then return; fi
-      echo -e "[INFO:overlay] $1"
+      if [ $LOGGING != "info" ] && [ $LOGGING != "warning" ] && [ $LOGGING != "fail" ]; then return; fi
+      echo -e "[INFO:overlay] $1" | tee -a /mnt/overlayRoot.log
     }
 
     fail(){
-        log_unrecoverable_failure $@
-        if [ $SAFE -eq 1 ]; then
+        log_fail $@
+        if [ $ON_FAIL == "original" ]; then
             exec /sbin/init
-            #/bin/bash
             exit 0
-        else
+        elif [ $ON_FAIL == "console" ]; then
         # if this appears to hang your machine make sure your active console is the last 'console=' entry
         # in /boot/cmdline.txt
             exec /bin/bash # one can "exit" to original boot process
             exec /bin/init
+        else
+            exec /bin/bash
         fi
-    }
-
-    # Stolen from usr/share/initramfs-tools/scripts/functions
-
-    # Find a specific fstab entry
-    # $1=mountpoint
-    # $2=fstype (optional)
-    # returns 0 on success, 1 on failure (not found or no fstab)
-    read_fstab_entry() {
-      # Not found by default.
-      found=1
-      for file in /etc/fstab; do
-        if [ -f "$file" ]; then
-          while read MNT_FSNAME MNT_DIR MNT_TYPE MNT_OPTS MNT_FREQ MNT_PASS MNT_JUNK; do
-            case "$MNT_FSNAME" in
-              ""|\#*)
-              continue;
-              ;;
-            esac
-            if [ "$MNT_DIR" = "$1" ]; then
-              if [ -n "$2" ]; then
-                [ "$MNT_TYPE" = "$2" ] || continue;
-              fi
-              found=0
-              break 2
-            fi
-          done < "$file"
-        fi
-      done
-      log_info "fstab lookup of $1 $2 returned $MNT_FSNAME $MNT_DIR $MNT_TYPE $MNT_OPTS $MNT_FREQ $MNT_PASS $MNT_JUNK"
-      return $found
     }
 
     #Wait for a device to become available
@@ -162,66 +180,57 @@
         return $result
     }
 
-    # Resolve a device from a fstab type entry eg /dev/sda1 or UUID= or PARTUUID=
-    # $1 the entry to resolve
-    # This apears to be unreliable, and I see root is resolved by label as well
-    # Returns $DEV
-
-    resolve_device() {
-
-        DEV="$1"
-        if $(echo "$DEV" | grep -q "^/dev/"); then
-            log_info "No resolution necessary, device $DEV was available directly"
-        elif $(echo "$1" | grep -q '='); then
-            log_info "looking up $1 by a partuuid or uuid"
-            DEV="$(blkid -l -t $1 -o device)"
-            if [ -z "$DEV" ]; then
-                log_info "unable to resolve $1 trying by label $2"
-                DEV="$(blkid -L $2 -o device)"
-            fi
-        fi
-        log_info "final resolution is $DEV"
-        return $(echo "$DEV" | grep -q  "^/dev/")
-    }
-
     # Run the command specified in $1. Log the result. If the command fails and safe is selected abort to /bin/init
     # Otherwise drop to a bash prompt.
     run_protected_command(){
-        log_info "Running protected command: $1"
+        log_info "Run: $1"
         eval $1
         if [ $? -ne 0 ]; then
-            if [ $SAFE -eq 1 ]; then
-                undo
-                exec /sbin/init
-            fi
-            fail "ERROR: error executing $1"
+            log_fail "ERROR: error executing $1"
         fi
     }
 
 
-    # load module
-    run_protected_command "modprobe overlay"
-    # mount /proc
+    ################## BASIC SETUP & JUMPER DETECTION##############################################################
+
     run_protected_command "mount -t proc proc /proc"
+    run_protected_command "mount -t tmpfs inittemp /mnt"
+    run_protected_command "modprobe overlay"
 
-    gpio mode 4 up  # activate pull up resistor  ground is just above pin 4
+    gpio mode $GPIO_DISABLE up  # activate pull up resistor  ground is just above pin 4
+    gpio mode $GPIO_CONSOLE up
 
-    if [[ $(gpio read 4) = 0 ]]; then
-        log_info "aborting overlayRoot due to jumper"
+    if [[ $(gpio read $GPIO_DISABLE) = 0 ]]; then
+        log_info "Jumper on GPIO $GPIO_DISABLE overlayRoot -- will run /sbin/init directly"
         exec /sbin/init
         exit 0
+    elif [[ $(gpio read $GPIO_CONSOLE) = 0 ]]; then
+        log_info "Jumper on GPIO $GPIO_CONSOLE overlayRoot -- dropping straight to bash shell"
+        exec /bin/bash
+        exit 0
     else
-        log_info "No jumper -- running overlay root"
+        log_info "No jumper detected on $GPIO_CONSOLE or $GPIO_DISABLE-- continuing overlayRoot"
     fi
-
     ######################### PHASE 1 DATA COLLECTION #############################################################
 
     # ROOT
     read_fstab_entry "/"
-
-    if ! resolve_device $MNT_FSNAME $ROOT_LBL; then
-        log_unrecoverable_failure "Can't resolve root device from $MNT_FSNAME or label rootfs.  Try changing entry to UUID or plain device"
+    log_info "Found $MNT_FSNAME for root"
+    resolve_device $MNT_FSNAME
+    log_info "Resolved [$MNT_FSNAME] as [$DEV]"
+    if [ -z $DEV ]; then
+        resolve_device $SECONDARY_ROOT_RESOLUTION
+        log_info "Resolved device name [$SECONDARY_ROOT_RESOLUTION] as [$DEV]"
     fi
+
+    if [ -z $DEV ];  then
+        log_fail "Can't resolve root device from $MNT_FSNAME or $SECONDARY_ROOT_RESOLUTION.  Try changing entry to UUID or plain device"
+    fi
+
+    if ! test -e $DEV; then
+        log_fail "Resolved root to $DEV but can't find the device"
+    fi
+
 
     ROOT_MOUNT="mount -t $MNT_TYPE -o $MNT_OPTS,ro $DEV /mnt/lower"
 
@@ -231,18 +240,37 @@
         # Things don't go well if usb is not up or fsck is being performed
         # kludge -- wait for /dev/sda1
         await_device "/dev/sda1"  20  #Wait a generous amount of time for first device
-        if ! resolve_device $MNT_FSNAME $RW_LBL; then
-            log_info "No device found for $RW going to try for /dev/sdb1..."
+        if ! resolve_device $MNT_FSNAME; then
+            #log_info "No device found for $RW going to try for /dev/sdb1..."
             DEV="/dev/sdb1"
         fi
         #This time we are hopefully waiting for the actual device not /dev/sdb1
         await_device "$DEV" 5
         #Retry the lookup
-        if resolve_device $MNT_FSNAME $RW_LBL  &&  test -e "$DEV"; then
-            RW_MOUNT="mount -t $MNT_TYPE -o $MNT_OPTS $DEV $RW"
+
+        resolve_device $MNT_FSNAME
+        log_info "Resolved [$MNT_FSNAME] as [$DEV]"
+        if [ -z $DEV ]; then
+            resolve_device $SECONDARY_RW_RESOLUTION
+            log_info "Resolved [$SECONDARY_RW_RESOLUTION] as [$DEV]"
+        fi
+        await_device "$DEV" 20
+
+
+        if [ -n $DEV ] && [ -e "$DEV" ]; then
+
+                RW_MOUNT="mount -t $MNT_TYPE -o $MNT_OPTS $DEV $RW"
+
         else
-            log_recoverable_failure "Couldn't resolve the RW media or find it on $DEV"
-            RW_MOUNT="mount -t tmpfs emergency-root-rw $RW"
+            if ! test -e $DEV; then
+                log_warning "Resolved root to $DEV but can't find the device"
+            fi
+            if [ $ON_RW_MEDIA_NOT_FOUND == "tmpfs" ]; then
+                log_warning "Could not resolve the RW media or find it on $DEV"
+                RW_MOUNT="mount -t tmpfs emergency-root-rw $RW"
+            else
+                log_fail "Rw media required but not found"
+            fi
         fi
     else
         log_info "No rw fstab entry, will mount a tmpfs"
@@ -251,18 +279,11 @@
 
     ####################### PHASE 2 SANITY CHECK AND ABORT HANDLING ###############################################
 
-    if [ $UNRECOVERABLE -gt 0 ]; then
-        echo "Fix $UNRECOVERABLE unrecoverable errors and maybe $RECOVERABLE recoverable errors before overlayRoot will work"
-        exec /sbin/init
-        exit 0
-    elif [ $RECOVERABLE -gt 0 ] && [ $FAIL_TO_OVERLAY -eq 0]; then
-    echo stuff
-        #fail "Fix $RECOVERABLE recoverable errors or enable FAIL_TO_OVERLAY before overlayRoot will work"
+    if [ $FAILURES -gt 0 ]; then
+        fail "Fix $FAILURES failures and maybe $WARNINGS warnings before overlayRoot will work"
     fi
 
     ###################### PHASE 3 ACTUALLY DO STUFF ##############################################################
-
-    run_protected_command "mount -t tmpfs inittemp /mnt"
 
     # create a writable fs to then create our mountpoints
     mkdir /mnt/lower
@@ -289,6 +310,7 @@
     echo "#stored on the disk can be found in /ro/etc/fstab" >> /mnt/newroot/etc/fstab
     # change to the new overlay root
     cd /mnt/newroot
+    cat /mnt/overlayRoot.log >> /mnt/newroot/$LOG_FILE
     pivot_root . mnt
 exec chroot . sh -c "$(cat <<END
 # move ro and rw mounts to the new root

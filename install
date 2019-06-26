@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+
+if [ $(id -u) -ne 0 ]; then
+  printf "Script must be run as root. Try 'sudo overlayRoot-install'\n"
+  exit 1
+fi
+
+# Install prequisites
+echo "Updating apt database"
+apt update
+echo "installing dependencies"
+apt install -y wiringpi initramfs-tools
+
+# Is this a RootOverlay system?
+echo "Checking if rootOverlay is active"
+PREFIX=""
+if [ -d "/ro" ]; then
+  mount -o remount,rw /ro
+  PREFIX="/ro"
+fi
+
+echo "Making overlayRoot executable"
+chmod +x ./overlayRoot.sh
+echo "Copying files"
+cp overlayRoot.sh "$PREFIX/sbin"
+cp overlayRoot.conf "$PREFIX/etc"
+
+echo "Editing /boot/cmdline.txt"
+# Remove any init= entry then add a new one
+sudo sed -i 's| init=[^ ]*||' /boot/cmdline.txt
+sed -i 's|$| init=/sbin/overlayRoot.sh|' /boot/cmdline.txt
+
+echo "OverlayRoot installation completed.  "
+echo "Edit /etc/overlayRoot.conf and /etc/fstab as desired."
+echo "Reboot should activate overlayRoot"
+echo "Use the mount command to see what's going on when you reboot."
