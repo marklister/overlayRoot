@@ -6,26 +6,26 @@ cd overlayRoot
 sudo bash install
 
 ```
-1. Edit `/etc/overlayRoot.conf`:  to suit your preferences. OverlayRoot should work as expected with everything 
+2. Edit `/etc/overlayRoot.conf`:  to suit your preferences. OverlayRoot should work as expected with everything 
 set to default.
 
-1. OverlayRoot should work 
+3. OverlayRoot should work 
     as a read only root filesystem with a tmpfs overlay without any editing of /etc/fstab.  Only edit your fstab if you 
     require a persistent RW overlay or want to identify partitions by UUID. 
     Use `blkid` to display UUIDs.   
 
 ### Swap
-1. Recommend disabling swapping before using overlayRoot. 
+4. Recommend disabling swapping before using overlayRoot. 
 ```bash
 sudo dphys-swapfile swapoff
 sudo dphys-swapfile uninstall
 sudo update-rc.d dphys-swapfile remove
 ```
 ### Disable OverlayRoot
-4. To disable rootOverlay you can jumper the pin specified in the .conf file (default gpio 4) to ground.  Alternatively edit your 
+5. To disable rootOverlay you can jumper the pin specified in the .conf file (default gpio 4) to ground.  Alternatively edit your 
 cmdline.txt file and place init=/sbin/overlayRoot.sh on a separate line.  
  
-5. IF you want writable media edit your fstab so the the correct media is mounted at /mnt/root-rw.
+6. IF you want writable media edit your fstab so the the correct media is mounted at /mnt/root-rw.
  PARTUUID entries don't work at the moment (possibly a Debian bug) so use UUIDs or plain devices.
  Be careful you are not updating a non-persistent fstab.  Only the one on actual root works.
  You can mount anything at /mnt/root-rw the script is not opiniated.  The nofail option is recommended if you want to avoid
