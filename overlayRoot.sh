@@ -1,28 +1,5 @@
 #!/usr/bin/env bash
 #  Read-only Root-FS for Raspian using overlayfs
-#  Version 1.1
-#
-#  Version History:
-#  1.0: initial release
-#  1.1: adopted new fstab style with PARTUUID. the script will now look for a /dev/xyz definiton first
-#       (old raspbian), if that is not found, it will look for a partition with LABEL=rootfs, if that
-#       is not found it look for a PARTUUID string in fstab for / and convert that to a device name
-#       using the blkid command.
-#
-#  1.2: Modified the rw mount point to /mnt/root-rw and if a partition is mounted there (an fstab entry exists)
-#       already use that partition as the upper.  Allows one to offload writes to some other media and
-#       possibly write back the changes periodically to the lower.  Note when running in this mode
-#       a swapfile may be a reasonable idea.
-#
-#       You should probably specify 'defaults,noatime,nofail' on the mount options for the writeable media.
-#       Then you won't hang if the media doesn't mount.
-#
-#       I couldn't get partuuids to work, they seem to be available only after boot.  Try uuids or plain devices
-#
-#       Resolution by partition label is disabled unless one enables FAIL_TO-OVERLAY in the script
-#
-#       Support for a jumper on gpio 4 which disables the script if you ground the pin.  Install wiringpi if
-#       you want to use this.
 #
 #  Created 2017 by Pascal Suter @ DALCO AG, Switzerland to work on Raspian as custom init script
 #  (raspbian does not use an initramfs on boot)
@@ -53,28 +30,11 @@
 #  helps to prolong its life and prevent filesystem coruption in environments where the system is usually
 #  not shut down properly
 #
-#  Install:
-#  sudo apt install initramfs-tools # We don't use an initramfs but we borrow some bash functions from them.
-#  sudo apt install wiringpi  # if jumper detection required
-#  copy this script to /sbin/overlayRoot.sh, make it executable and add "init=/sbin/overlayRoot.sh" to the
-#  cmdline.txt file in the raspbian image's boot partition.
-#  I strongly recommend to disable swapping before using this. it will work with swap but that just does
-#  not make sens as the swap file will be stored in the tempfs which again resides in the ram.
-#  run these commands on the booted raspberry pi BEFORE you set the init=/sbin/overlayRoot.sh boot option:
-#  sudo dphys-swapfile swapoff
-#  sudo dphys-swapfile uninstall
-#  sudo update-rc.d dphys-swapfile remove
-#
-#  If you want writable media edit your fstab so the the correct media is mounted at /mnt/root-rw.
-#  PARTUUID entries don't work at the moment (possibly a Debian bug) so use UUIDs or plain devices.
-#  Be careful you are not updating a non persistent fstab!  Only the one on actual root works.
-#
-#  To install software, run upgrades and do other changes to the raspberry setup, simply remove the init=
-#  entry from the cmdline.txt file and reboot, make the changes, add the init= entry and reboot once more.
 
 defaults(){
 
-    # OverlayRoot config file
+    # OverlayRoot config file  override these defaults in /etc/overlayRoot.conf
+
     # What to do if the script fails
     # original = run the original /sbin/init
     # console = start a bash console. Useful for debugging
@@ -114,6 +74,7 @@ defaults(){
     # Jumper this pin to ground to boot to an emergency bash console
     GPIO_CONSOLE=1
 
+    #Read the selected configuration
     source /etc/overlayRoot.conf
 }
 
@@ -126,21 +87,21 @@ defaults(){
     WARNINGS=0
 
     log_fail(){
-        if [ $LOGGING == "warning" ] || [ $LOGGING == "fail" ]; then
-            echo -e "[FAIL:overlay] $@" | tee -a /mnt/overlayRoot.log
-        fi
+        echo -e "[FAIL:overlay] $@" | tee -a /mnt/overlayRoot.log
         ((FAILURES++))
     }
+
     log_warning(){
-        if [ $LOGGING == "warning" ] || [ $LOGGING == "fail" ]; then
+        if [ $LOGGING == "warning" ] || [ $LOGGING == "info" ]; then
             echo -e "[FAIL:overlay] $@" | tee -a /mnt/overlayRoot.log
         fi
         ((WARNINGS++))
     }
 
     log_info(){
-      if [ $LOGGING != "info" ] && [ $LOGGING != "warning" ] && [ $LOGGING != "fail" ]; then return; fi
-      echo -e "[INFO:overlay] $1" | tee -a /mnt/overlayRoot.log
+        if [ $LOGGING == "info" ]; then
+            echo -e "[INFO:overlay] $1" | tee -a /mnt/overlayRoot.log
+        fi
     }
 
     fail(){
@@ -220,11 +181,11 @@ defaults(){
     log_info "Resolved [$MNT_FSNAME] as [$DEV]"
     if [ -z $DEV ]; then
         resolve_device $SECONDARY_ROOT_RESOLUTION
-        log_info "Resolved device name [$SECONDARY_ROOT_RESOLUTION] as [$DEV]"
+        log_info "Resolved device [$SECONDARY_ROOT_RESOLUTION] as [$DEV]"
     fi
 
     if [ -z $DEV ];  then
-        log_fail "Can't resolve root device from $MNT_FSNAME or $SECONDARY_ROOT_RESOLUTION.  Try changing entry to UUID or plain device"
+        log_fail "Can't resolve root device from [$MNT_FSNAME] or [$SECONDARY_ROOT_RESOLUTION].  Try changing entry to UUID or plain device"
     fi
 
     if ! test -e $DEV; then
