@@ -9,7 +9,7 @@ to retain updates across reboots.
 
 * Root is mounted at `/ro` and tmpfs at `/rw` 
 
-###Install
+### Install
 * Copy this directory to a directory on your pi.  Change to that directory and run `sudo bash install`.  
 ```bash
 git clone https://github.com/marklister/overlayRoot.git
@@ -32,7 +32,7 @@ sudo update-rc.d dphys-swapfile remove
 
 #### Disable overlayRoot entirely
 
-* To disable rootOverlay you can jumper the pin specified in the .conf file (default gpio 4) to ground.  
+* To disable overlayRoot you can jumper the pin specified in the .conf file (default gpio 4) to ground.  
 
 * Alternatively edit your 
 `cmdline.txt` file and place `init=/sbin/overlayRoot.sh` on a separate line.  
@@ -62,7 +62,7 @@ pi@raspberrypi:~ $
 ### Persistent media
 
 * Enable persistent media by placing an entry in your `/etc/fstab`. Edit 
-`/ro/etc/fstab` if rootOvelay is active. 
+`/ro/etc/fstab` if overlayRoot is active. 
 
 ```bash
 proc                                          /proc          proc    defaults                 0       0
